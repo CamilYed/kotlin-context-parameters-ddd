@@ -1,28 +1,58 @@
-# Kotlin Context Parameters DDD Example
+# Kotlin Context Parameters w aplikacji DDD
 
 Polski | [English](README.md)
 
-Mały projekt Kotlin/JVM pokazujący `context parameters` na przykładzie kodu w stylu DDD / hexagonal architecture.
+Praktyczny przykład wykorzystania **context parameters** w Kotlinie 2.4 na bazie małej aplikacji napisanej w stylu DDD i hexagonal architecture.
 
-Projekt jest celowo mały. Nie ma tutaj Springa ani kontenera DI. Chodzi o pokazanie, gdzie `context parameters` pasują, gdy kod ma już wyraźną domenę, warstwę aplikacji i adaptery.
+Repozytorium jest dodatkiem do artykułu:
 
-## Co pokazuje to repo
+👉 https://camilyed.github.io/pl/kotlin-context-parameters-nie-di-tylko-kontekst-wykonania/
 
-Przykład odpowiada na praktyczne pytanie:
+## Po co powstało to repo?
 
-> jak use case i agregat mogą opisać kontekst wykonania bez wrzucania wszystkiego w konstruktor i bez chowania zależności w service locatorze?
+Większość przykładów pokazuje samą składnię.
 
-W repo używam:
+Tutaj interesowało mnie inne pytanie:
 
-- Kotlin 2.4.0,
-- JDK 25,
-- Gradle 9.5.1,
-- JUnit 6,
-- Strikt do asercji,
-- małego agregatu `Order`,
-- adapterów in-memory do testów i demo.
+> Gdzie context parameters pasują w prawdziwej aplikacji?
 
-## Struktura pakietów
+Przykład pokazuje połączenie:
+
+- context parameters
+- DDD
+- hexagonal architecture
+- warstwy aplikacji
+- testy Given-When-Then
+
+## Model mentalny
+
+```text
+constructor injection -> stałe zależności obiektu
+zwykłe parametry      -> dane wejściowe operacji
+context parameters    -> kontekst wykonania
+```
+
+Przykłady kontekstu wykonania:
+
+- aktualny użytkownik
+- zegar
+- eventy domenowe
+- transakcja
+- tenant context
+
+## Architektura
+
+```text
+adapter
+   |
+   v
+application
+   |
+   v
+domain
+```
+
+Struktura:
 
 ```text
 src/main/kotlin/io/github/camilyed/contextparameters
@@ -31,68 +61,16 @@ src/main/kotlin/io/github/camilyed/contextparameters
 └── adapter
 ```
 
-Kierunek zależności jest prosty:
-
-```text
-application -> domain
-adapter     -> domain
-```
-
-Interfejsy takie jak `OrderRepository`, `ClockProvider`, `DomainEvents` i `Transaction` są w `domain`. Nie ma osobnego pakietu `ports`.
-
-## Domena
-
-Domena ma jeden agregat: `Order`.
-
-Agregat pilnuje tej reguły:
-
-```text
-Zamówienie można potwierdzić tylko wtedy, gdy:
-- nadal jest szkicem,
-- aktualny użytkownik jest właścicielem albo może potwierdzać zamówienia,
-- potwierdzenie zapisuje aktualny czas,
-- potwierdzenie publikuje event domenowy OrderConfirmed.
-```
-
-Stan jest reprezentowany przez sealed type:
+## Przykład
 
 ```kotlin
-sealed interface OrderState {
-
-    data object Draft : OrderState
-
-    data class Confirmed(
-        val confirmedAt: Instant,
-    ) : OrderState
-}
-```
-
-Operacja agregatu jawnie deklaruje kontekst wykonania:
-
-```kotlin
-context(clock: ClockProvider, events: DomainEvents, user: UserContext)
+context(
+    clock: ClockProvider,
+    events: DomainEvents,
+    user: UserContext,
+)
 fun confirm()
 ```
-
-Agregat nie tworzy zegara, nie wie skąd pochodzi aktualny użytkownik i nie wie jak dostarczane są eventy.
-
-Mówi tylko:
-
-> żeby potwierdzić zamówienie, taki kontekst musi być dostępny.
-
-## Warstwa aplikacji
-
-Use case ma jedną zależność w konstruktorze:
-
-```kotlin
-class ConfirmOrderUseCase(
-    private val orderRepository: OrderRepository,
-)
-```
-
-Repozytorium jest stałą zależnością use case'a.
-
-Sama operacja potrzebuje kontekstu wykonania:
 
 ```kotlin
 context(
@@ -101,135 +79,40 @@ context(
     user: UserContext,
     transaction: Transaction,
 )
-fun confirm(command: ConfirmOrderCommand): OrderSnapshot =
-    transaction.within {
-        val order = orderRepository.findById(command.orderId)
-
-        order.confirm()
-
-        orderRepository.save(order)
-
-        order.toSnapshot()
-    }
+fun confirm(command: ConfirmOrderCommand): OrderSnapshot
 ```
 
-Dzięki temu podział jest czytelny:
+## Domena
 
-```text
-constructor injection -> stała zależność obiektu
-zwykły parametr       -> dane wejściowe operacji
-context parameter     -> kontekst wykonania
-```
+Przykład zawiera jeden agregat: Order.
 
-## Adaptery
+Reguła biznesowa:
 
-Adaptery dostarczają konkretne implementacje abstrakcji z domeny.
-
-Przykład:
-
-```kotlin
-class InMemoryOrderRepository : OrderRepository {
-
-    private val orders = mutableMapOf<OrderId, Order>()
-
-    override fun findById(id: OrderId): Order =
-        orders[id]
-            ?: throw OrderNotFoundException("Order with id ${id.value} not found")
-
-    override fun save(order: Order) {
-        orders[order.id] = order
-    }
-}
-```
-
-Adapter zależy od interfejsu domenowego. Domena nie zależy od adaptera.
+- szkic można potwierdzić
+- użytkownik musi być właścicielem lub mieć uprawnienia
+- zapisujemy czas potwierdzenia
+- publikujemy event domenowy
 
 ## Testy
 
-Testy są pisane w stylu Given-When-Then.
+- JUnit 6
+- Strikt
+- Given-When-Then
+- buildery
+- fake'i
+- własne asercje
 
-Wsparcie testów jest podzielone na małe elementy:
-
-```text
-src/test/kotlin/io/github/camilyed/contextparameters/testing
-├── ability
-├── assertions
-├── builders
-└── fakes
-```
-
-Przykład:
-
-```kotlin
-@Test
-fun `should confirm draft order by owner`() {
-    // given
-    val order =
-        Order.fromSnapshot(
-            anOrder()
-                .withId("ORD-123")
-                .ownedBy("user-123")
-                .build(),
-        )
-
-    // and
-    currentUserIs("user-123")
-
-    // and
-    currentTimeIs("2026-06-05T10:15:30Z")
-
-    // when
-    context(clock, domainEvents, currentUser) {
-        order.confirm()
-    }
-
-    // then
-    expectThat(order.toSnapshot())
-        .isConfirmed()
-        .wasConfirmedAt("2026-06-05T10:15:30Z")
-
-    // and
-    expectThat(domainEvents)
-        .hasPublishedOrderConfirmed(
-            orderId = "ORD-123",
-            confirmedAt = "2026-06-05T10:15:30Z",
-        )
-}
-```
-
-Test nie odpala frameworka. Tworzy mały kontekst i sprawdza zachowanie domeny.
+Bez Springa. Bez kontenera DI.
 
 ## Wymagania
 
 - JDK 25
-- Gradle 9.5.1
 - Kotlin 2.4.0
+- Gradle 9.5.1
 
-## Uruchomienie lokalnie
+## Uruchomienie
 
 ```bash
 ./gradlew clean test
 ./gradlew run
-```
-
-Jeżeli brakuje wrappera, wygeneruj go raz:
-
-```bash
-sdk install gradle 9.5.1
-sdk use gradle 9.5.1
-gradle wrapper --gradle-version=9.5.1 --distribution-type=bin
-```
-
-Potem używaj już tylko:
-
-```bash
-./gradlew clean test
-```
-
-## Artykuł
-
-Powiązany artykuł:
-
-```text
-https://camilyed.github.io/pl/kotlin-context-parameters-nie-di-tylko-kontekst-wykonania/
 ```
