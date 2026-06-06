@@ -1,51 +1,48 @@
 # Kotlin Context Parameters DDD Example
 
-Small Kotlin/JVM project showing `context parameters` in a DDD-style codebase.
+[Polski](README.pl.md) | English
 
-The example is intentionally small. There is no Spring here, because the goal is not to show framework integration.
-The goal is to show where `context parameters` can make domain and application code more explicit without turning them into a replacement for dependency injection.
+Small Kotlin/JVM repository showing `context parameters` in a DDD / hexagonal architecture example.
+
+The project is intentionally small. There is no Spring and no DI container here. The point is to show where `context parameters` fit when the code already has clear domain, application and adapter boundaries.
+
+## What this repository shows
+
+The example answers one practical question:
+
+> how can a use case and an aggregate express execution context without turning it into constructor dependency or hiding it behind a service locator?
+
+The code uses:
+
+- Kotlin 2.4.0,
+- JDK 25,
+- Gradle 9.5.1,
+- JUnit 6,
+- Strikt for assertions,
+- a small DDD-style `Order` aggregate,
+- in-memory adapters for tests and demo.
+
+## Package structure
+
+```text
+src/main/kotlin/io/github/camilyed/contextparameters
+├── domain
+├── application
+└── adapter
+```
+
+The direction is simple:
+
+```text
+application -> domain
+adapter     -> domain
+```
+
+Interfaces such as `OrderRepository`, `ClockProvider`, `DomainEvents` and `Transaction` live in `domain`. There is no separate `ports` package.
 
 ## Domain
 
 The domain contains one aggregate: `Order`.
-
-The aggregate has a very small lifecycle:
-
-```text
-Draft -> Confirmed
-```
-
-There is no enum for the order state. The state is modeled as a sealed type:
-
-```kotlin
-sealed interface OrderState {
-    data object Draft : OrderState
-
-    data class Confirmed(
-        val confirmedAt: Instant,
-    ) : OrderState
-}
-```
-
-This avoids the common `status + nullable confirmedAt` shape.
-
-Instead of this:
-
-```kotlin
-status = Confirmed
-confirmedAt = null // impossible state
-```
-
-the model says:
-
-```kotlin
-OrderState.Draft
-OrderState.Confirmed(confirmedAt = now)
-```
-
-A confirmed order always has confirmation time, because the timestamp is part of the `Confirmed` state.
-
-## Aggregate rule
 
 The aggregate protects this rule:
 
@@ -57,25 +54,45 @@ An order can be confirmed only when:
 - confirmation publishes an OrderConfirmed domain event.
 ```
 
-The important part is the operation signature:
+State is represented by a sealed type:
+
+```kotlin
+sealed interface OrderState {
+
+    data object Draft : OrderState
+
+    data class Confirmed(
+        val confirmedAt: Instant,
+    ) : OrderState
+}
+```
+
+The aggregate operation declares its execution context explicitly:
 
 ```kotlin
 context(clock: ClockProvider, events: DomainEvents, user: UserContext)
 fun confirm()
 ```
 
-`Order.confirm()` does not take `clock`, `events` and `user` as normal parameters.
-It also does not hide them behind a global service locator.
+The aggregate does not create a clock, does not know where the current user comes from and does not know how events are delivered.
 
-It says:
+It only says:
 
-> this operation requires this execution context.
-
-If the context is not available at the call site, the code does not compile.
+> to confirm an order, this context must be available.
 
 ## Application layer
 
-The application layer adds transaction handling:
+The use case has one constructor dependency:
+
+```kotlin
+class ConfirmOrderUseCase(
+    private val orderRepository: OrderRepository,
+)
+```
+
+The repository is a stable dependency of the use case.
+
+The operation itself needs execution context:
 
 ```kotlin
 context(
@@ -96,74 +113,122 @@ fun confirm(command: ConfirmOrderCommand): OrderSnapshot =
     }
 ```
 
-Constructor injection is still used where it makes sense:
-
-```kotlin
-class ConfirmOrderUseCase(
-    private val orderRepository: OrderRepository,
-)
-```
-
-The repository is a stable dependency of the use case.
-The clock, current user, domain events and transaction are execution context.
-
-## Package structure
+This gives a clear split:
 
 ```text
-src/main/kotlin/io/github/camilyed/contextparameters
-├── domain
-├── application
-└── adapter
+constructor injection -> stable dependency of the object
+normal parameter      -> operation input
+context parameter     -> execution context
 ```
 
-Interfaces such as `OrderRepository`, `ClockProvider`, `DomainEvents` and `Transaction` are in `domain`.
-There is no `ports` package.
+## Adapters
+
+Adapters provide concrete implementations for domain abstractions.
+
+Example:
+
+```kotlin
+class InMemoryOrderRepository : OrderRepository {
+
+    private val orders = mutableMapOf<OrderId, Order>()
+
+    override fun findById(id: OrderId): Order =
+        orders[id]
+            ?: throw OrderNotFoundException("Order with id ${id.value} not found")
+
+    override fun save(order: Order) {
+        orders[order.id] = order
+    }
+}
+```
+
+The adapter depends on the domain interface. The domain does not depend on the adapter.
 
 ## Tests
 
-Tests follow a simple Given-When-Then style.
+Tests are written in a Given-When-Then style.
 
-Test support is split into:
+Test support is split into small pieces:
 
 ```text
-testing/
+src/test/kotlin/io/github/camilyed/contextparameters/testing
 ├── ability
 ├── assertions
 ├── builders
 └── fakes
 ```
 
-There is no large scenario DSL object.
-The tests use small abilities, builders, fakes and custom Strikt assertions.
+Example:
+
+```kotlin
+@Test
+fun `should confirm draft order by owner`() {
+    // given
+    val order =
+        Order.fromSnapshot(
+            anOrder()
+                .withId("ORD-123")
+                .ownedBy("user-123")
+                .build(),
+        )
+
+    // and
+    currentUserIs("user-123")
+
+    // and
+    currentTimeIs("2026-06-05T10:15:30Z")
+
+    // when
+    context(clock, domainEvents, currentUser) {
+        order.confirm()
+    }
+
+    // then
+    expectThat(order.toSnapshot())
+        .isConfirmed()
+        .wasConfirmedAt("2026-06-05T10:15:30Z")
+
+    // and
+    expectThat(domainEvents)
+        .hasPublishedOrderConfirmed(
+            orderId = "ORD-123",
+            confirmedAt = "2026-06-05T10:15:30Z",
+        )
+}
+```
+
+The test does not start a framework. It creates a small context and verifies domain behavior.
 
 ## Requirements
 
 - JDK 25
 - Gradle 9.5.1
 - Kotlin 2.4.0
-- JUnit 6.1.0
 
-## First run
-
-Generate the official Gradle Wrapper locally:
-
-```bash
-sdk install gradle 9.5.1
-sdk use gradle 9.5.1
-
-gradle wrapper --gradle-version=9.5.1 --distribution-type=bin
-```
-
-Then use the wrapper:
+## Running locally
 
 ```bash
 ./gradlew clean test
 ./gradlew run
 ```
 
+If the wrapper is missing, generate it once:
+
+```bash
+sdk install gradle 9.5.1
+sdk use gradle 9.5.1
+gradle wrapper --gradle-version=9.5.1 --distribution-type=bin
+```
+
+Then use only:
+
+```bash
+./gradlew clean test
+```
+
 ## Article
 
-Article link will be added later.
+Related article:
 
 ```text
 https://camilyed.github.io/pl/kotlin-context-parameters-nie-di-tylko-kontekst-wykonania/
