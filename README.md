@@ -231,5 +231,5 @@ Then use only:
 Related article:
 
 ```text
-https://camilyed.github.io/pl/kotlin-context-parameters-nie-di-tylko-kontekst-wykonania/
+https://camilyed.github.io/en/kotlin-context-parameters-not-di-but-execution-context/
 ```
