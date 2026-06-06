@@ -1,36 +1,33 @@
 package io.github.camilyed.contextparameters.domain
 
-import java.time.Instant
-
 class Order private constructor(
     val id: OrderId,
     val ownerId: UserId,
-    private var status: OrderStatus,
-    private var confirmedAtValue: Instant? = null,
+    private var state: OrderState,
 ) {
-    val confirmedAt: Instant?
-        get() = confirmedAtValue
-
-    fun status(): OrderStatus = status
+    fun state(): OrderState =
+        state
 
     context(clock: ClockProvider, events: DomainEvents, user: UserContext)
     fun confirm() {
-        require(status == OrderStatus.Draft) {
-            "Only draft orders can be confirmed"
+        require(state == OrderState.Draft) {
+            "Only draft order can be confirmed"
         }
-        require(user.canConfirmOrders || user.userId == ownerId) {
+
+        require(user.userId == ownerId || user.canConfirmOrders) {
             "User cannot confirm this order"
         }
 
         val now = clock.now()
 
-        status = OrderStatus.Confirmed
-        confirmedAtValue = now
+        state = OrderState.Confirmed(
+            confirmedAt = now,
+        )
+
         events.publish(
             OrderConfirmed(
                 orderId = id,
                 confirmedAt = now,
-                confirmedBy = user.userId,
             ),
         )
     }
@@ -39,36 +36,25 @@ class Order private constructor(
         OrderSnapshot(
             id = id,
             ownerId = ownerId,
-            status = status,
-            confirmedAt = confirmedAtValue,
+            state = state,
         )
 
     companion object {
-        fun draft(id: OrderId, ownerId: UserId): Order =
+        fun draft(
+            id: OrderId,
+            ownerId: UserId,
+        ): Order =
             Order(
                 id = id,
                 ownerId = ownerId,
-                status = OrderStatus.Draft,
+                state = OrderState.Draft,
             )
 
         fun fromSnapshot(snapshot: OrderSnapshot): Order =
             Order(
                 id = snapshot.id,
                 ownerId = snapshot.ownerId,
-                status = snapshot.status,
-                confirmedAtValue = snapshot.confirmedAt,
+                state = snapshot.state,
             )
     }
 }
-
-enum class OrderStatus {
-    Draft,
-    Confirmed,
-}
-
-data class OrderSnapshot(
-    val id: OrderId,
-    val ownerId: UserId,
-    val status: OrderStatus,
-    val confirmedAt: Instant?,
-)

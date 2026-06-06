@@ -1,5 +1,5 @@
 package io.github.camilyed.contextparameters.domain
 
 interface Transaction {
-    val id: String
+    fun <T> within(block: () -> T): T
 }

@@ -15,10 +15,15 @@ application {
 }
 
 dependencies {
-    testImplementation("org.junit.jupiter:junit-jupiter:6.1.0")
+    testImplementation(platform("org.junit:junit-bom:6.1.0"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+    testImplementation("io.strikt:strikt-core:0.35.1")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 tasks.test {
     useJUnitPlatform()
+    testLogging {
+        events("passed", "skipped", "failed")
+    }
 }

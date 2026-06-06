@@ -1,205 +1,170 @@
 # Kotlin Context Parameters DDD Example
 
-Small Kotlin project used as a companion repository for an article about `context parameters`.
+Small Kotlin/JVM project showing `context parameters` in a DDD-style codebase.
 
-The goal is not to build a web application. The goal is to show where `context parameters` fit in a small DDD / hexagonal architecture example.
+The example is intentionally small. There is no Spring here, because the goal is not to show framework integration.
+The goal is to show where `context parameters` can make domain and application code more explicit without turning them into a replacement for dependency injection.
 
-Article link: _to be added_
+## Domain
 
-## Why no Spring?
+The domain contains one aggregate: `Order`.
 
-Spring would be useful if the example needed HTTP endpoints, dependency injection, configuration, profiles, or infrastructure integration.
+The aggregate has a very small lifecycle:
 
-Here it would mostly add noise.
+```text
+Draft -> Confirmed
+```
 
-This repository focuses on one question:
+There is no enum for the order state. The state is modeled as a sealed type:
 
-> When is a dependency a constructor dependency, when is it a regular function argument, and when is it a context of execution?
+```kotlin
+sealed interface OrderState {
+    data object Draft : OrderState
 
-That question is easier to see in a plain Kotlin project.
+    data class Confirmed(
+        val confirmedAt: Instant,
+    ) : OrderState
+}
+```
 
-## Tech stack
+This avoids the common `status + nullable confirmedAt` shape.
 
-- Kotlin `2.4.0`
-- JDK `25`
-- Gradle `9.5.1`
-- JUnit `6.1.0`
-- No Spring
-- No persistence framework
-- In-memory adapters only
+Instead of this:
 
-## Architecture
+```kotlin
+status = Confirmed
+confirmedAt = null // impossible state
+```
 
-The project uses a small hexagonal architecture shape:
+the model says:
+
+```kotlin
+OrderState.Draft
+OrderState.Confirmed(confirmedAt = now)
+```
+
+A confirmed order always has confirmation time, because the timestamp is part of the `Confirmed` state.
+
+## Aggregate rule
+
+The aggregate protects this rule:
+
+```text
+An order can be confirmed only when:
+- it is still a draft,
+- the current user is the owner or can confirm orders,
+- confirmation stores the current time,
+- confirmation publishes an OrderConfirmed domain event.
+```
+
+The important part is the operation signature:
+
+```kotlin
+context(clock: ClockProvider, events: DomainEvents, user: UserContext)
+fun confirm()
+```
+
+`Order.confirm()` does not take `clock`, `events` and `user` as normal parameters.
+It also does not hide them behind a global service locator.
+
+It says:
+
+> this operation requires this execution context.
+
+If the context is not available at the call site, the code does not compile.
+
+## Application layer
+
+The application layer adds transaction handling:
+
+```kotlin
+context(
+    clock: ClockProvider,
+    events: DomainEvents,
+    user: UserContext,
+    transaction: Transaction,
+)
+fun confirm(command: ConfirmOrderCommand): OrderSnapshot =
+    transaction.within {
+        val order = orderRepository.findById(command.orderId)
+
+        order.confirm()
+
+        orderRepository.save(order)
+
+        order.toSnapshot()
+    }
+```
+
+Constructor injection is still used where it makes sense:
+
+```kotlin
+class ConfirmOrderUseCase(
+    private val orderRepository: OrderRepository,
+)
+```
+
+The repository is a stable dependency of the use case.
+The clock, current user, domain events and transaction are execution context.
+
+## Package structure
 
 ```text
 src/main/kotlin/io/github/camilyed/contextparameters
 ├── domain
-│   ├── Order.kt
-│   ├── OrderRepository.kt
-│   ├── ClockProvider.kt
-│   ├── DomainEvents.kt
-│   ├── Transaction.kt
-│   └── UserContext.kt
 ├── application
-│   └── ConfirmOrderUseCase.kt
 └── adapter
-    ├── inmemory
-    │   ├── InMemoryOrderRepository.kt
-    │   └── InMemoryTransaction.kt
-    ├── recording
-    │   └── RecordingDomainEvents.kt
-    └── system
-        └── SystemClockProvider.kt
 ```
 
-There is intentionally no `ports` package.
-
-The interfaces are part of the domain package, for example:
-
-```kotlin
-interface OrderRepository {
-    context(tx: Transaction)
-    fun get(id: OrderId): Order
-
-    context(tx: Transaction)
-    fun save(order: Order)
-}
-```
-
-This keeps the language close to the domain instead of turning the package structure into an architecture diagram.
-
-## Main idea
-
-The domain operation needs a few things from the execution environment:
-
-- current time,
-- current user,
-- event publisher.
-
-With regular parameters, the method would look like this:
-
-```kotlin
-fun confirm(
-    clock: ClockProvider,
-    events: DomainEvents,
-    user: UserContext,
-) {
-    // ...
-}
-```
-
-With `context parameters`, the operation says something more precise:
-
-```kotlin
-context(clock: ClockProvider, events: DomainEvents, user: UserContext)
-fun confirm() {
-    // ...
-}
-```
-
-This reads as:
-
-> I can confirm an order, but only inside a context that provides time, events, and current user.
-
-If that context is missing at the call site, the code does not compile.
-
-## Example use case
-
-```kotlin
-class ConfirmOrderUseCase(
-    private val orders: OrderRepository,
-) {
-    context(
-        clock: ClockProvider,
-        events: DomainEvents,
-        user: UserContext,
-        tx: Transaction,
-    )
-    fun confirm(command: ConfirmOrderCommand): OrderSnapshot {
-        val order = orders.get(command.orderId)
-
-        order.confirm()
-        orders.save(order)
-
-        return order.toSnapshot()
-    }
-}
-```
-
-The repository is injected through the constructor because it defines the use case.
-
-The clock, events, current user, and transaction are context parameters because they describe the environment of this operation.
-
-## Running locally
-
-Generate the Gradle wrapper first:
-
-```bash
-gradle wrapper --gradle-version 9.5.1
-```
-
-Then run tests:
-
-```bash
-./gradlew test
-```
-
-Run the demo:
-
-```bash
-./gradlew run
-```
+Interfaces such as `OrderRepository`, `ClockProvider`, `DomainEvents` and `Transaction` are in `domain`.
+There is no `ports` package.
 
 ## Tests
 
-The tests are intentionally written without Spring and without mocks.
+Tests follow a simple Given-When-Then style.
 
-```kotlin
-val snapshot = context(clock, events, user, tx) {
-    useCase.confirm(ConfirmOrderCommand(orderId))
-}
-```
-
-The context is explicit in the test setup, but it does not pollute the business operation itself.
-
-## Rule of thumb
-
-Use regular parameters for business input:
-
-```kotlin
-fun confirmOrder(orderId: OrderId)
-```
-
-Use constructor injection for stable object dependencies:
-
-```kotlin
-class ConfirmOrderUseCase(
-    private val orders: OrderRepository,
-)
-```
-
-Use context parameters for execution context:
-
-```kotlin
-context(user: UserContext, tx: Transaction)
-fun confirmOrder(orderId: OrderId)
-```
-
-## Repository setup
-
-Recommended repository name:
+Test support is split into:
 
 ```text
-kotlin-context-parameters-ddd
+testing/
+├── ability
+├── assertions
+├── builders
+└── fakes
 ```
 
-Create and push:
+There is no large scenario DSL object.
+The tests use small abilities, builders, fakes and custom Strikt assertions.
+
+## Requirements
+
+- JDK 25
+- Gradle 9.5.1
+- Kotlin 2.4.0
+- JUnit 6.1.0
+
+## First run
+
+Generate the official Gradle Wrapper locally:
 
 ```bash
-gh repo create CamilYed/kotlin-context-parameters-ddd   --public   --description "Kotlin context parameters in a small DDD / hexagonal architecture example"   --source=.   --remote=origin   --push
+sdk install gradle 9.5.1
+sdk use gradle 9.5.1
+
+gradle wrapper --gradle-version=9.5.1 --distribution-type=bin
 ```
 
-## License
+Then use the wrapper:
 
-MIT
+```bash
+./gradlew clean test
+./gradlew run
+```
+
+## Article
+
+Article link will be added later.
+
+```text
+https://camilyed.github.io/pl/kotlin-context-parameters-nie-di-tylko-kontekst-wykonania/
+```

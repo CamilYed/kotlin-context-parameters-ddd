@@ -1,205 +1,170 @@
-# Kotlin Context Parameters — przykład DDD
+# Kotlin Context Parameters DDD Example
 
-Mały projekt w Kotlinie jako repozytorium do artykułu o `context parameters`.
+Mały projekt Kotlin/JVM pokazujący `context parameters` w kodzie w stylu DDD.
 
-Celem nie jest zbudowanie aplikacji webowej. Celem jest pokazanie, gdzie `context parameters` pasują w małym przykładzie DDD / architektury heksagonalnej.
+Przykład jest celowo mały. Nie ma tutaj Springa, bo celem nie jest integracja z frameworkiem.
+Celem jest pokazanie, gdzie `context parameters` mogą poprawić czytelność domeny i warstwy aplikacji, bez udawania, że zastępują dependency injection.
 
-Link do artykułu: _do uzupełnienia_
+## Domena
 
-## Dlaczego bez Springa?
+Domena ma jeden agregat: `Order`.
 
-Spring miałby sens, gdyby przykład pokazywał HTTP, dependency injection, konfigurację, profile albo integrację z infrastrukturą.
+Agregat ma bardzo prosty cykl życia:
 
-Tutaj Spring głównie zasłoniłby temat.
+```text
+Draft -> Confirmed
+```
 
-Ten projekt odpowiada na jedno pytanie:
+Nie ma enuma dla statusu zamówienia. Stan jest zamodelowany jako sealed type:
 
-> Kiedy zależność powinna być w konstruktorze, kiedy powinna być zwykłym argumentem funkcji, a kiedy jest kontekstem wykonania?
+```kotlin
+sealed interface OrderState {
+    data object Draft : OrderState
 
-To pytanie dużo łatwiej zobaczyć w czystym projekcie Kotlinowym.
+    data class Confirmed(
+        val confirmedAt: Instant,
+    ) : OrderState
+}
+```
 
-## Stack
+Dzięki temu unikamy klasycznego układu `status + nullable confirmedAt`.
 
-- Kotlin `2.4.0`
-- JDK `25`
-- Gradle `9.5.1`
-- JUnit `6.1.0`
-- bez Springa
-- bez frameworka persistence
-- tylko adaptery in-memory
+Czyli zamiast takiego modelu:
 
-## Architektura
+```kotlin
+status = Confirmed
+confirmedAt = null // stan, który nie powinien istnieć
+```
 
-Projekt ma mały kształt architektury heksagonalnej:
+mamy:
+
+```kotlin
+OrderState.Draft
+OrderState.Confirmed(confirmedAt = now)
+```
+
+Potwierdzone zamówienie zawsze ma czas potwierdzenia, bo ten czas jest częścią stanu `Confirmed`.
+
+## Reguła agregatu
+
+Agregat pilnuje tej reguły:
+
+```text
+Zamówienie można potwierdzić tylko wtedy, gdy:
+- nadal jest szkicem,
+- aktualny użytkownik jest właścicielem albo może potwierdzać zamówienia,
+- potwierdzenie zapisuje aktualny czas,
+- potwierdzenie publikuje event domenowy OrderConfirmed.
+```
+
+Najważniejsza jest sygnatura operacji:
+
+```kotlin
+context(clock: ClockProvider, events: DomainEvents, user: UserContext)
+fun confirm()
+```
+
+`Order.confirm()` nie przyjmuje `clock`, `events` i `user` jako zwykłych parametrów.
+Nie chowa ich też za globalnym service locatorem.
+
+Ta metoda mówi:
+
+> ta operacja wymaga takiego kontekstu wykonania.
+
+Jeśli kontekstu nie ma w miejscu wywołania, kod się nie skompiluje.
+
+## Warstwa aplikacji
+
+Warstwa aplikacji dokłada transakcję:
+
+```kotlin
+context(
+    clock: ClockProvider,
+    events: DomainEvents,
+    user: UserContext,
+    transaction: Transaction,
+)
+fun confirm(command: ConfirmOrderCommand): OrderSnapshot =
+    transaction.within {
+        val order = orderRepository.findById(command.orderId)
+
+        order.confirm()
+
+        orderRepository.save(order)
+
+        order.toSnapshot()
+    }
+```
+
+Constructor injection nadal zostaje tam, gdzie ma sens:
+
+```kotlin
+class ConfirmOrderUseCase(
+    private val orderRepository: OrderRepository,
+)
+```
+
+Repozytorium jest stałą zależnością use case'a.
+Zegar, aktualny użytkownik, eventy domenowe i transakcja są kontekstem wykonania.
+
+## Struktura pakietów
 
 ```text
 src/main/kotlin/io/github/camilyed/contextparameters
 ├── domain
-│   ├── Order.kt
-│   ├── OrderRepository.kt
-│   ├── ClockProvider.kt
-│   ├── DomainEvents.kt
-│   ├── Transaction.kt
-│   └── UserContext.kt
 ├── application
-│   └── ConfirmOrderUseCase.kt
 └── adapter
-    ├── inmemory
-    │   ├── InMemoryOrderRepository.kt
-    │   └── InMemoryTransaction.kt
-    ├── recording
-    │   └── RecordingDomainEvents.kt
-    └── system
-        └── SystemClockProvider.kt
 ```
 
-Celowo nie ma pakietu `ports`.
-
-Interfejsy są w pakiecie `domain`, na przykład:
-
-```kotlin
-interface OrderRepository {
-    context(tx: Transaction)
-    fun get(id: OrderId): Order
-
-    context(tx: Transaction)
-    fun save(order: Order)
-}
-```
-
-Dzięki temu język kodu zostaje blisko domeny, a pakiety nie udają prezentacji o architekturze.
-
-## Główna myśl
-
-Operacja domenowa potrzebuje kilku rzeczy z otoczenia:
-
-- aktualnego czasu,
-- aktualnego użytkownika,
-- publishera eventów.
-
-Jako zwykłe parametry wyglądałoby to tak:
-
-```kotlin
-fun confirm(
-    clock: ClockProvider,
-    events: DomainEvents,
-    user: UserContext,
-) {
-    // ...
-}
-```
-
-Z `context parameters` metoda mówi coś bardziej precyzyjnego:
-
-```kotlin
-context(clock: ClockProvider, events: DomainEvents, user: UserContext)
-fun confirm() {
-    // ...
-}
-```
-
-Czyli:
-
-> Potrafię potwierdzić zamówienie, ale tylko w kontekście, który dostarcza czas, eventy i aktualnego użytkownika.
-
-Jeżeli tego kontekstu nie ma w miejscu wywołania, kod się nie skompiluje.
-
-## Przykład use case’a
-
-```kotlin
-class ConfirmOrderUseCase(
-    private val orders: OrderRepository,
-) {
-    context(
-        clock: ClockProvider,
-        events: DomainEvents,
-        user: UserContext,
-        tx: Transaction,
-    )
-    fun confirm(command: ConfirmOrderCommand): OrderSnapshot {
-        val order = orders.get(command.orderId)
-
-        order.confirm()
-        orders.save(order)
-
-        return order.toSnapshot()
-    }
-}
-```
-
-Repozytorium jest w konstruktorze, bo definiuje use case.
-
-Zegar, eventy, aktualny użytkownik i transakcja są context parameters, bo opisują środowisko wykonania tej operacji.
-
-## Uruchomienie lokalnie
-
-Najpierw wygeneruj Gradle Wrapper:
-
-```bash
-gradle wrapper --gradle-version 9.5.1
-```
-
-Potem uruchom testy:
-
-```bash
-./gradlew test
-```
-
-Uruchom demo:
-
-```bash
-./gradlew run
-```
+Interfejsy takie jak `OrderRepository`, `ClockProvider`, `DomainEvents` i `Transaction` są w `domain`.
+Nie ma pakietu `ports`.
 
 ## Testy
 
-Testy są celowo bez Springa i bez mocków.
+Testy są pisane prosto, w stylu Given-When-Then.
 
-```kotlin
-val snapshot = context(clock, events, user, tx) {
-    useCase.confirm(ConfirmOrderCommand(orderId))
-}
-```
-
-Kontekst jest jawny w przygotowaniu testu, ale nie zaśmieca samej operacji biznesowej.
-
-## Prosta zasada
-
-Zwykłe parametry dla danych wejściowych:
-
-```kotlin
-fun confirmOrder(orderId: OrderId)
-```
-
-Constructor injection dla stałych zależności obiektu:
-
-```kotlin
-class ConfirmOrderUseCase(
-    private val orders: OrderRepository,
-)
-```
-
-Context parameters dla kontekstu wykonania:
-
-```kotlin
-context(user: UserContext, tx: Transaction)
-fun confirmOrder(orderId: OrderId)
-```
-
-## Założenie repozytorium
-
-Proponowana nazwa repo:
+Wsparcie testów jest podzielone na:
 
 ```text
-kotlin-context-parameters-ddd
+testing/
+├── ability
+├── assertions
+├── builders
+└── fakes
 ```
 
-Utworzenie i push:
+Nie ma dużego obiektu typu scenario DSL.
+Są małe abilities, buildery, fake'i i custom assertions w Strikt.
+
+## Wymagania
+
+- JDK 25
+- Gradle 9.5.1
+- Kotlin 2.4.0
+- JUnit 6.1.0
+
+## Pierwsze uruchomienie
+
+Wygeneruj lokalnie oficjalny Gradle Wrapper:
 
 ```bash
-gh repo create CamilYed/kotlin-context-parameters-ddd   --public   --description "Kotlin context parameters in a small DDD / hexagonal architecture example"   --source=.   --remote=origin   --push
+sdk install gradle 9.5.1
+sdk use gradle 9.5.1
+
+gradle wrapper --gradle-version=9.5.1 --distribution-type=bin
 ```
 
-## Licencja
+Potem używaj wrappera:
 
-MIT
+```bash
+./gradlew clean test
+./gradlew run
+```
+
+## Artykuł
+
+Link do artykułu dodamy później.
+
+```text
+https://camilyed.github.io/pl/kotlin-context-parameters-nie-di-tylko-kontekst-wykonania/
+```
